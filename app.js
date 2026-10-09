@@ -7,7 +7,7 @@ const ROB_NOTICE = "No payments go through this site. Contact Rob (Connor's dad)
 
 const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const state = { items: [], people: [], contributions: [], loaded: false, adminPw: null, editingId: null };
+const state = { items: [], people: [], contributions: [], buyers: [], loaded: false, adminPw: null, editingId: null };
 
 const $ = (sel) => document.querySelector(sel);
 const grid = $('#grid');
@@ -49,12 +49,13 @@ const isExpired = (item) => item.status === 'reserved' && new Date(item.reserved
 
 // ---------- data ----------
 async function load() {
-  const [items, people, contributions] = await Promise.all([
+  const [items, people, contributions, buyers] = await Promise.all([
     db.from('items').select('*').order('created_at'),
     db.from('people').select('id,name').order('name'),
     db.from('contributions').select('*').order('created_at'),
+    db.from('item_buyers').select('*').order('created_at'),
   ]);
-  const failed = items.error || people.error || contributions.error;
+  const failed = items.error || people.error || contributions.error || buyers.error;
   if (failed) {
     console.error(failed);
     if (!state.loaded) grid.innerHTML = '<p class="empty">Couldn\'t load the list. Check your connection and refresh.</p>';
@@ -63,6 +64,7 @@ async function load() {
   state.items = items.data;
   state.people = people.data;
   state.contributions = contributions.data;
+  state.buyers = buyers.data;
   state.loaded = true;
   render();
   checkExpiry();
@@ -108,16 +110,23 @@ function renderGuest() {
     byItem.get(c.item_id).push(c);
   }
   const sorted = [...state.items].sort((a, b) => (a.status === 'bought') - (b.status === 'bought'));
-  grid.innerHTML = sorted.map((item) => cardHtml(item, byItem.get(item.id) || [], names)).join('');
+  const gettingOne = (item) => state.buyers.filter((b) => b.item_id === item.id).map((b) => names.get(b.person_id) || 'Someone');
+  grid.innerHTML = sorted.map((item) => cardHtml(item, byItem.get(item.id) || [], names, gettingOne(item))).join('');
 }
 
-function cardHtml(item, contribs, names) {
+function cardHtml(item, contribs, names, gettingOne) {
   const bought = item.status === 'bought';
   const price = item.price == null ? null : Number(item.price);
   const pledged = sum(contribs, (c) => c.amount);
   let actions = '';
 
-  if (!bought && item.status === 'reserved') {
+  if (item.allow_multiple) {
+    // Multi-buy items never get reserved or crossed off: people just add their name.
+    actions += `<span class="pill multi">🎁 More than one person can get this</span>`;
+    if (gettingOne.length) actions += `<div class="getting">Getting one: <b>${gettingOne.map(esc).join(', ')}</b></div>`;
+    actions += `<label class="tick"><input type="checkbox" data-action="multi" data-id="${item.id}"> I'm getting one</label>`;
+    if (gettingOne.length) actions += `<button type="button" class="link-btn" data-action="unmulti" data-id="${item.id}">Remove – I'm not getting one anymore</button>`;
+  } else if (!bought && item.status === 'reserved') {
     const d = daysLeft(item);
     actions += `<span class="pill">Reserved by ${esc(item.reserved_by)} – ${d} day${d === 1 ? '' : 's'} left</span>
       <label class="tick"><input type="checkbox" data-action="bought" data-id="${item.id}"> Bought</label>
@@ -288,6 +297,30 @@ function helpSheet(item) {
   });
 }
 
+function multiSheet(item) {
+  openSheet(sheetForm(`Getting “${esc(item.name)}”?`,
+    `<p>More than one person can get this, so it stays on the list. Add your name so everyone can see who's getting one.</p>${namePicker()}`,
+    "I'm getting one"));
+  onSheetSubmit(async (form) => {
+    const name = readName(form);
+    await rpc('add_buyer', { p_item_id: item.id, p_name: name });
+    localStorage.setItem('wishlist-name', name);
+    closeSheet();
+    toast(`Thanks, ${name}! You're down for one`);
+  });
+}
+
+function unmultiSheet(item) {
+  openSheet(sheetForm(`Not getting “${esc(item.name)}” anymore?`,
+    `<p>Pick your name and we'll take it off this one.</p>${namePicker()}`,
+    'Remove my name', 'danger'));
+  onSheetSubmit(async (form) => {
+    await rpc('remove_buyer', { p_item_id: item.id, p_name: readName(form) });
+    closeSheet();
+    toast('Removed');
+  });
+}
+
 function unreserveSheet(item) {
   openSheet(sheetForm(`Not buying “${esc(item.name)}” anymore?`,
     `<p>No problem. Pick your name and it goes back on the list for someone else. Only the person who reserved it can remove it.</p>${namePicker()}`,
@@ -340,6 +373,8 @@ grid.addEventListener('click', (e) => {
   if (el.dataset.action === 'reserve') reserveSheet(item);
   if (el.dataset.action === 'bought') boughtSheet(item);
   if (el.dataset.action === 'unreserve') unreserveSheet(item);
+  if (el.dataset.action === 'multi') multiSheet(item);
+  if (el.dataset.action === 'unmulti') unmultiSheet(item);
   if (el.dataset.action === 'help') helpSheet(item);
 });
 
@@ -385,6 +420,7 @@ function renderAdmin() {
         <h3>${esc(item.name)}${item.price != null ? ` · ${money(item.price)}` : ''}</h3>
         ${item.where_to_buy ? `<div class="meta">🛒 ${whereHtml(item.where_to_buy)}</div>` : ''}
         ${item.notes ? `<div class="meta">${esc(item.notes)}</div>` : ''}
+        ${item.allow_multiple ? '<div class="meta">✓ Multiple purchase allowed</div>' : ''}
       </div>
       <div class="row">
         <button type="button" class="btn small" data-action="admin-edit" data-id="${item.id}">Edit</button>
@@ -408,6 +444,7 @@ function resetItemForm(item = null) {
     itemForm.elements.price.value = item.price ?? '';
     itemForm.elements.where.value = item.where_to_buy ?? '';
     itemForm.elements.notes.value = item.notes ?? '';
+    itemForm.elements.multi.checked = item.allow_multiple;
   }
 }
 
@@ -564,6 +601,7 @@ itemForm.addEventListener('submit', async (e) => {
       p_price: f.price.value === '' ? null : Number(f.price.value),
       p_where_to_buy: f.where.value,
       p_notes: f.notes.value,
+      p_allow_multiple: f.multi.checked,
     });
     toast(state.editingId ? 'Saved' : 'Added to the wishlist');
     resetItemForm();
