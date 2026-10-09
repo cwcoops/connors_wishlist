@@ -1,0 +1,474 @@
+const SUPABASE_URL = 'https://bjectonbtzkyhwknpkyf.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_xnLOTsP5nGdplpzlk687Og_OG4wXjcH';
+const PHOTO_BUCKET = 'item-photos';
+const RESERVE_MS = 5 * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const ROB_NOTICE = "No payments go through this site. Contact Rob (Connor's dad) to send your contribution — he'll tell you whether to send money or get a gift card etc.";
+
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+const state = { items: [], people: [], contributions: [], loaded: false, adminPw: null, editingId: null };
+
+const $ = (sel) => document.querySelector(sel);
+const grid = $('#grid');
+const sheet = $('#sheet');
+
+// ---------- helpers ----------
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const money = (n) => {
+  const v = Number(n);
+  return '£' + (Number.isInteger(v) ? v.toLocaleString('en-GB') : v.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+};
+const sum = (list, pick) => Math.round(list.reduce((t, x) => t + Number(pick(x)), 0) * 100) / 100;
+
+function toast(msg) {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.hidden = false;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => { el.hidden = true; }, 4000);
+}
+
+function whereHtml(where) {
+  if (!where) return '';
+  const text = where.trim();
+  if (/^(https?:\/\/|www\.)\S+$/i.test(text)) {
+    const href = /^https?:/i.test(text) ? text : 'https://' + text;
+    let label = text;
+    try { label = new URL(href).hostname.replace(/^www\./, ''); } catch { /* keep raw text */ }
+    return `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(label)} ↗</a>`;
+  }
+  return esc(text);
+}
+
+function daysLeft(item) {
+  const left = new Date(item.reserved_at).getTime() + RESERVE_MS - Date.now();
+  return Math.max(1, Math.ceil(left / DAY_MS));
+}
+const isExpired = (item) => item.status === 'reserved' && new Date(item.reserved_at).getTime() + RESERVE_MS <= Date.now();
+
+// ---------- data ----------
+async function load() {
+  const [items, people, contributions] = await Promise.all([
+    db.from('items').select('*').order('created_at'),
+    db.from('people').select('id,name').order('name'),
+    db.from('contributions').select('*').order('created_at'),
+  ]);
+  const failed = items.error || people.error || contributions.error;
+  if (failed) {
+    console.error(failed);
+    if (!state.loaded) grid.innerHTML = '<p class="empty">Couldn\'t load the list. Check your connection and refresh.</p>';
+    return;
+  }
+  state.items = items.data;
+  state.people = people.data;
+  state.contributions = contributions.data;
+  state.loaded = true;
+  render();
+  checkExpiry();
+}
+
+let reloadTimer;
+function scheduleLoad() {
+  clearTimeout(reloadTimer);
+  reloadTimer = setTimeout(load, 150);
+}
+
+// Reservations lapse after 5 days: the server resets them, any open page triggers it.
+async function checkExpiry() {
+  if (!state.items.some(isExpired)) return;
+  const { error } = await db.rpc('expire_reservations');
+  if (error) console.error(error);
+  else scheduleLoad();
+}
+
+async function rpc(name, args) {
+  const { data, error } = await db.rpc(name, args);
+  if (error) throw new Error(error.message || 'Something went wrong');
+  scheduleLoad();
+  return data;
+}
+
+// ---------- guest view ----------
+function render() {
+  if (state.adminPw) renderAdmin();
+  else renderGuest();
+}
+
+function renderGuest() {
+  if (!state.loaded) return;
+  if (!state.items.length) {
+    grid.innerHTML = '<p class="empty">Nothing on the list yet – check back soon! 🎈</p>';
+    return;
+  }
+  const names = new Map(state.people.map((p) => [p.id, p.name]));
+  const byItem = new Map();
+  for (const c of state.contributions) {
+    if (!byItem.has(c.item_id)) byItem.set(c.item_id, []);
+    byItem.get(c.item_id).push(c);
+  }
+  const sorted = [...state.items].sort((a, b) => (a.status === 'bought') - (b.status === 'bought'));
+  grid.innerHTML = sorted.map((item) => cardHtml(item, byItem.get(item.id) || [], names)).join('');
+}
+
+function cardHtml(item, contribs, names) {
+  const bought = item.status === 'bought';
+  const price = item.price == null ? null : Number(item.price);
+  const pledged = sum(contribs, (c) => c.amount);
+  let actions = '';
+
+  if (!bought && item.status === 'reserved') {
+    const d = daysLeft(item);
+    actions += `<span class="pill">Reserved by ${esc(item.reserved_by)} – ${d} day${d === 1 ? '' : 's'} left</span>
+      <label class="tick"><input type="checkbox" data-action="bought" data-id="${item.id}"> Bought</label>`;
+  } else if (!bought) {
+    if (price && contribs.length) actions += chipInHtml(price, contribs, names);
+    if (!contribs.length) actions += `<label class="tick"><input type="checkbox" data-action="reserve" data-id="${item.id}"> I'm going to buy it</label>`;
+    if (price && pledged < price) actions += `<button type="button" class="btn" data-action="help" data-id="${item.id}">Help buy</button>`;
+  }
+
+  return `<article class="card${bought ? ' bought' : ''}">
+    <div class="photo">${item.photo_url ? `<img src="${esc(item.photo_url)}" alt="" loading="lazy">` : '🎁'}</div>
+    <div class="body">
+      <div class="title"><h3>${esc(item.name)}</h3>${price ? `<span class="price">${money(price)}</span>` : ''}</div>
+      ${item.where_to_buy ? `<div class="where">🛒 ${whereHtml(item.where_to_buy)}</div>` : ''}
+      ${item.notes ? `<p class="notes">${esc(item.notes)}</p>` : ''}
+      ${actions ? `<div class="actions">${actions}</div>` : ''}
+    </div>
+    ${bought ? `<div class="bought-mark"><svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><line x1="6" y1="6" x2="94" y2="94"/><line x1="94" y1="6" x2="6" y2="94"/></svg><span class="stamp">BOUGHT</span></div>` : ''}
+  </article>`;
+}
+
+function chipInHtml(price, contribs, names) {
+  const pledged = sum(contribs, (c) => c.amount);
+  const confirmed = sum(contribs.filter((c) => c.organised_with_rob), (c) => c.amount);
+  const pending = Math.round((pledged - confirmed) * 100) / 100;
+  const pct = (n) => Math.min(100, (n / price) * 100).toFixed(2);
+  const rows = contribs.map((c) => {
+    const who = `<span><b>${esc(names.get(c.person_id) || 'Someone')}</b> · ${money(c.amount)}</span>`;
+    if (c.organised_with_rob) return `<li>${who}<span class="tag ok">Confirmed ✓</span></li>`;
+    return `<li>${who}<span class="tag wait">Pending</span>
+      <label class="tick small"><input type="checkbox" data-action="confirm" data-id="${c.id}"> I've organised this with Rob</label></li>`;
+  }).join('');
+  return `<div class="chip-in">
+    <div class="bar" role="img" aria-label="${money(pledged)} of ${money(price)} pledged">
+      <div class="confirmed" style="width:${pct(confirmed)}%"></div><div class="pending" style="width:${pct(pending)}%"></div>
+    </div>
+    <div class="bar-text">${money(pledged)} of ${money(price)} <small>– ${money(confirmed)} confirmed, ${money(pending)} pending</small></div>
+    <ul class="contribs">${rows}</ul>
+  </div>`;
+}
+
+// ---------- sheets ----------
+function openSheet(html) {
+  sheet.innerHTML = html;
+  if (!sheet.open) sheet.showModal();
+}
+function closeSheet() {
+  if (sheet.open) sheet.close();
+}
+sheet.addEventListener('click', (e) => {
+  if (e.target === sheet || e.target.closest('[data-close]')) closeSheet();
+});
+sheet.addEventListener('change', (e) => {
+  if (e.target.name === 'person') {
+    const custom = sheet.querySelector('[data-new-name]');
+    custom.hidden = e.target.value !== '__new';
+    if (!custom.hidden) custom.querySelector('input').focus();
+  }
+});
+
+function namePicker() {
+  const last = localStorage.getItem('wishlist-name') || '';
+  if (!state.people.length) {
+    return `<label>Your name<input name="newName" maxlength="40" required placeholder="Type your name" value="${esc(last)}"></label>`;
+  }
+  const known = state.people.some((p) => p.name === last);
+  return `<label>Your name
+      <select name="person" required>
+        <option value="" ${known ? '' : 'selected'} disabled>Pick your name…</option>
+        ${state.people.map((p) => `<option ${p.name === last ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+        <option value="__new">➕ My name isn't here</option>
+      </select>
+    </label>
+    <label data-new-name hidden>Type your name<input name="newName" maxlength="40" placeholder="e.g. Auntie Sue"></label>`;
+}
+
+function readName(form) {
+  const picked = form.elements.person ? form.elements.person.value : '__new';
+  const name = (picked === '__new' ? form.elements.newName.value : picked).trim().replace(/\s+/g, ' ');
+  if (!name) throw new Error('Please pick or type your name');
+  return name;
+}
+
+// Runs a sheet form's submit with a busy state and inline errors.
+function onSheetSubmit(handler) {
+  const form = sheet.querySelector('form');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = form.querySelector('[type=submit]');
+    const err = form.querySelector('.error');
+    err.textContent = '';
+    btn.disabled = true;
+    try {
+      await handler(form);
+    } catch (ex) {
+      err.textContent = ex.message;
+      btn.disabled = false;
+    }
+  });
+}
+
+const sheetForm = (title, body, submitLabel, submitClass = 'primary') => `
+  <form method="dialog">
+    <h2>${title}</h2>
+    ${body}
+    <div class="error" role="alert"></div>
+    <div class="row">
+      <button type="button" class="btn ghost" data-close>Cancel</button>
+      <button type="submit" class="btn ${submitClass}">${submitLabel}</button>
+    </div>
+  </form>`;
+
+const infoSheet = (title, body) => openSheet(`<div class="stack"><h2>${title}</h2>${body}<button type="button" class="btn primary" data-close>Got it</button></div>`);
+
+function reserveSheet(item) {
+  openSheet(sheetForm(`Buying “${esc(item.name)}”?`,
+    `<p>Tell us who you are and we'll take it off the list for everyone else.</p>${namePicker()}`,
+    "I'm going to buy it"));
+  onSheetSubmit(async (form) => {
+    const name = readName(form);
+    await rpc('reserve_item', { p_item_id: item.id, p_name: name });
+    localStorage.setItem('wishlist-name', name);
+    infoSheet(`It's yours, ${esc(name)}! 🎉`,
+      `<div class="notice">You've got 5 days to buy this, otherwise it goes back on the list. Come back and tick 'Bought' once you've got it!</div>`);
+  });
+}
+
+function boughtSheet(item) {
+  openSheet(sheetForm(`Bought “${esc(item.name)}”?`,
+    `<p>Pick your name to confirm. Only the person who reserved it can tick it off.</p>${namePicker()}`,
+    "Yes, I've bought it"));
+  onSheetSubmit(async (form) => {
+    const name = readName(form);
+    await rpc('mark_bought', { p_item_id: item.id, p_name: name });
+    localStorage.setItem('wishlist-name', name);
+    infoSheet('Amazing, thank you! 🎁', '<p>It\'s now marked as bought for everyone.</p>');
+  });
+}
+
+function helpSheet(item) {
+  const pledged = sum(state.contributions.filter((c) => c.item_id === item.id), (c) => c.amount);
+  const remaining = Math.round((Number(item.price) - pledged) * 100) / 100;
+  openSheet(sheetForm(`Help buy “${esc(item.name)}”`,
+    `<p>${money(remaining)} of ${money(item.price)} still needed. Chip in whatever you like.</p>
+     ${namePicker()}
+     <label>Amount (£)<input name="amount" type="number" inputmode="decimal" min="0.01" max="${remaining}" step="0.01" required placeholder="e.g. 20"></label>
+     <div class="notice">${esc(ROB_NOTICE)}</div>`,
+    'Chip in'));
+  onSheetSubmit(async (form) => {
+    const name = readName(form);
+    const amount = Number(form.elements.amount.value);
+    if (!(amount > 0)) throw new Error('Enter an amount more than £0');
+    await rpc('add_contribution', { p_item_id: item.id, p_name: name, p_amount: amount });
+    localStorage.setItem('wishlist-name', name);
+    infoSheet(`Thanks, ${esc(name)}! 🙌`,
+      `<p>Your ${money(amount)} is on the list as <b>pending</b>.</p>
+       <div class="notice">${esc(ROB_NOTICE)}</div>
+       <div class="notice info">Once that's sorted, come back and tick “I've organised this with Rob” next to your name.</div>`);
+  });
+}
+
+function confirmSheet(contribution) {
+  const person = state.people.find((p) => p.id === contribution.person_id);
+  openSheet(sheetForm('All sorted with Rob?',
+    `<p>Only tick this if you're <b>${esc(person ? person.name : 'the person who chipped in')}</b> and you've organised your ${money(contribution.amount)} with Rob.</p>`,
+    "Yes, it's organised"));
+  onSheetSubmit(async () => {
+    await rpc('confirm_contribution', { p_contribution_id: contribution.id });
+    closeSheet();
+    toast('Confirmed – thank you!');
+  });
+}
+
+grid.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  // Tickboxes only become ticked once the action has really gone through.
+  if (el.type === 'checkbox') el.checked = false;
+  const id = el.dataset.id;
+  if (el.dataset.action === 'confirm') {
+    const c = state.contributions.find((x) => x.id === id);
+    if (c) confirmSheet(c);
+    return;
+  }
+  const item = state.items.find((x) => x.id === id);
+  if (!item) return;
+  if (el.dataset.action === 'reserve') reserveSheet(item);
+  if (el.dataset.action === 'bought') boughtSheet(item);
+  if (el.dataset.action === 'help') helpSheet(item);
+});
+
+// ---------- admin ----------
+// Deliberately shows only what was entered: no status, names or contributions.
+function passwordSheet() {
+  openSheet(sheetForm('Password',
+    '<label>Enter password<input name="pw" type="password" inputmode="numeric" autocomplete="off" required></label>',
+    'Unlock'));
+  sheet.querySelector('input').focus();
+  onSheetSubmit(async (form) => {
+    const pw = form.elements.pw.value;
+    const { error } = await db.rpc('admin_login', { p_password: pw });
+    if (error) throw new Error('Wrong password');
+    state.adminPw = pw;
+    closeSheet();
+    showAdmin(true);
+  });
+}
+
+function showAdmin(on) {
+  $('#admin').hidden = !on;
+  $('#guest').hidden = on;
+  if (!on) {
+    state.adminPw = null;
+    history.replaceState(null, '', location.pathname);
+  }
+  resetItemForm();
+  render();
+  window.scrollTo(0, 0);
+}
+
+function renderAdmin() {
+  const list = $('#admin-list');
+  if (!state.items.length) {
+    list.innerHTML = '<p class="empty">No items yet – add your first one above.</p>';
+    return;
+  }
+  list.innerHTML = state.items.map((item) => `
+    <article class="admin-item">
+      <div class="thumb">${item.photo_url ? `<img src="${esc(item.photo_url)}" alt="">` : '🎁'}</div>
+      <div>
+        <h3>${esc(item.name)}${item.price != null ? ` · ${money(item.price)}` : ''}</h3>
+        ${item.where_to_buy ? `<div class="meta">🛒 ${whereHtml(item.where_to_buy)}</div>` : ''}
+        ${item.notes ? `<div class="meta">${esc(item.notes)}</div>` : ''}
+      </div>
+      <div class="row">
+        <button type="button" class="btn small" data-action="admin-edit" data-id="${item.id}">Edit</button>
+        <button type="button" class="btn small ghost" data-action="admin-delete" data-id="${item.id}">Delete</button>
+      </div>
+    </article>`).join('');
+}
+
+const itemForm = $('#item-form');
+
+function resetItemForm(item = null) {
+  itemForm.reset();
+  state.editingId = item ? item.id : null;
+  $('#form-title').textContent = item ? 'Edit item' : 'Add an item';
+  $('#form-submit').textContent = item ? 'Save changes' : 'Add item';
+  $('#form-cancel').hidden = !item;
+  const current = $('#photo-current');
+  current.hidden = !(item && item.photo_url);
+  current.innerHTML = item && item.photo_url
+    ? `<img src="${esc(item.photo_url)}" alt=""><label><input type="checkbox" name="removePhoto"> Remove photo</label>`
+    : '';
+  if (item) {
+    itemForm.elements.name.value = item.name;
+    itemForm.elements.price.value = item.price ?? '';
+    itemForm.elements.where.value = item.where_to_buy ?? '';
+    itemForm.elements.notes.value = item.notes ?? '';
+  }
+}
+
+// Phone photos are huge: shrink to a sensible JPEG before uploading.
+async function shrinkPhoto(file) {
+  const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  const scale = Math.min(1, 1400 / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  return new Promise((resolve, reject) => canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('Could not read that photo'))), 'image/jpeg', 0.85));
+}
+
+async function uploadPhoto(file) {
+  const blob = await shrinkPhoto(file);
+  const path = `${crypto.randomUUID()}.jpg`;
+  const { error } = await db.storage.from(PHOTO_BUCKET).upload(path, blob, { contentType: 'image/jpeg', cacheControl: '31536000' });
+  if (error) throw new Error('Photo upload failed: ' + error.message);
+  return db.storage.from(PHOTO_BUCKET).getPublicUrl(path).data.publicUrl;
+}
+
+itemForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = $('#form-submit');
+  btn.disabled = true;
+  try {
+    const f = itemForm.elements;
+    const existing = state.items.find((x) => x.id === state.editingId);
+    let photoUrl = existing && !(f.removePhoto && f.removePhoto.checked) ? existing.photo_url : null;
+    if (f.photo.files[0]) photoUrl = await uploadPhoto(f.photo.files[0]);
+    await rpc('admin_save_item', {
+      p_password: state.adminPw,
+      p_id: state.editingId,
+      p_name: f.name.value,
+      p_photo_url: photoUrl,
+      p_price: f.price.value === '' ? null : Number(f.price.value),
+      p_where_to_buy: f.where.value,
+      p_notes: f.notes.value,
+    });
+    toast(state.editingId ? 'Saved' : 'Added to the wishlist');
+    resetItemForm();
+  } catch (ex) {
+    toast(ex.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('#admin').addEventListener('click', (e) => {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const item = state.items.find((x) => x.id === el.dataset.id);
+  switch (el.dataset.action) {
+    case 'admin-exit': showAdmin(false); break;
+    case 'admin-cancel-edit': resetItemForm(); break;
+    case 'admin-edit':
+      if (item) { resetItemForm(item); itemForm.scrollIntoView({ behavior: 'smooth' }); }
+      break;
+    case 'admin-delete':
+      if (!item) break;
+      openSheet(sheetForm(`Delete “${esc(item.name)}”?`, '<p>This removes it from the wishlist for everyone. It can\'t be undone.</p>', 'Delete', 'danger'));
+      onSheetSubmit(async () => {
+        await rpc('admin_delete_item', { p_password: state.adminPw, p_id: item.id });
+        if (state.editingId === item.id) resetItemForm();
+        closeSheet();
+      });
+      break;
+  }
+});
+
+$('#sponsor').addEventListener('click', () => {
+  if (!state.adminPw) passwordSheet();
+});
+
+// ---------- start ----------
+db.channel('wishlist')
+  .on('postgres_changes', { event: '*', schema: 'public' }, scheduleLoad)
+  .subscribe((status) => { if (status === 'SUBSCRIBED') scheduleLoad(); });
+
+// Phones drop the socket when the tab sleeps, so catch up on return.
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
+setInterval(() => { if (!state.adminPw) renderGuest(); checkExpiry(); }, 30000);
+
+// Opening the page at #admin goes straight to the password box with the list hidden.
+if (location.hash === '#admin') {
+  $('#guest').hidden = true;
+  passwordSheet();
+  sheet.addEventListener('close', () => { if (!state.adminPw) showAdmin(false); }, { once: true });
+}
+
+load();

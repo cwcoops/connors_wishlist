@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Connor's Wishlist</title>
+  <meta name="description" content="Connor's 18th birthday wishlist – pick something, tick it off, keep it a surprise.">
+  <meta name="theme-color" content="#6c3bff">
+  <meta property="og:title" content="Connor's Wishlist 🎂">
+  <meta property="og:description" content="Connor's 18th birthday wishlist – pick something and tick it off so nobody doubles up.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎁</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="sponsor" id="sponsor">
+      <img src="assets/prowsey-fc.png" alt="" width="30" height="30">
+      <span>Sponsored by<br><b>Prowsey FC</b></span>
+    </div>
+  </header>
+
+  <main id="guest">
+    <section class="hero">
+      <div class="confetti" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      <span class="badge">🎂 The big 18</span>
+      <h1>Connor's Wishlist</h1>
+      <p>Found something you'd like to get? Tick it so nobody doubles up. Connor can't see who's getting what – it all stays a surprise.</p>
+    </section>
+    <section id="grid" class="grid" aria-live="polite">
+      <p class="empty">Loading the list…</p>
+    </section>
+  </main>
+
+  <main id="admin" hidden>
+    <section class="admin-head">
+      <h1>My listings</h1>
+      <button type="button" class="btn ghost small" data-action="admin-exit">Exit (guest view – spoilers!)</button>
+    </section>
+    <form id="item-form" class="panel" autocomplete="off">
+      <h2 id="form-title">Add an item</h2>
+      <label>Name<input name="name" required maxlength="120" placeholder="e.g. Noise-cancelling headphones"></label>
+      <label>Photo<input name="photo" type="file" accept="image/*"></label>
+      <div id="photo-current" class="photo-current" hidden></div>
+      <label>Price (£, optional)<input name="price" type="number" inputmode="decimal" min="0.01" step="0.01" placeholder="e.g. 49.99"></label>
+      <label>Where to buy<input name="where" maxlength="500" placeholder="Paste a link, or type a shop like Co-op"></label>
+      <label>Notes<textarea name="notes" rows="3" maxlength="1000" placeholder="Size, colour, anything helpful"></textarea></label>
+      <div class="row">
+        <button class="btn primary" type="submit" id="form-submit">Add item</button>
+        <button class="btn ghost" type="button" data-action="admin-cancel-edit" id="form-cancel" hidden>Cancel</button>
+      </div>
+    </form>
+    <section id="admin-list" class="admin-list"></section>
+  </main>
+
+  <dialog id="sheet" class="sheet"></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
