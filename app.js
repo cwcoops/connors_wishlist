@@ -167,8 +167,15 @@ function openSheet(html) {
 function closeSheet() {
   if (sheet.open) sheet.close();
 }
+// Close on a tap that starts on the backdrop (not one that drags out of the sheet).
+let pressedBackdrop = false;
+sheet.addEventListener('pointerdown', (e) => {
+  const r = sheet.getBoundingClientRect();
+  pressedBackdrop = e.target === sheet && (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom);
+});
 sheet.addEventListener('click', (e) => {
-  if (e.target === sheet || e.target.closest('[data-close]')) closeSheet();
+  if ((e.target === sheet && pressedBackdrop) || e.target.closest('[data-close]')) closeSheet();
+  pressedBackdrop = false;
 });
 sheet.addEventListener('change', (e) => {
   if (e.target.name === 'person') {
@@ -367,11 +374,8 @@ function resetItemForm(item = null) {
   $('#form-title').textContent = item ? 'Edit item' : 'Add an item';
   $('#form-submit').textContent = item ? 'Save changes' : 'Add item';
   $('#form-cancel').hidden = !item;
-  const current = $('#photo-current');
-  current.hidden = !(item && item.photo_url);
-  current.innerHTML = item && item.photo_url
-    ? `<img src="${esc(item.photo_url)}" alt=""><label><input type="checkbox" name="removePhoto"> Remove photo</label>`
-    : '';
+  state.photo = item && item.photo_url ? { url: item.photo_url } : null;
+  renderPhoto();
   if (item) {
     itemForm.elements.name.value = item.name;
     itemForm.elements.price.value = item.price ?? '';
@@ -380,22 +384,137 @@ function resetItemForm(item = null) {
   }
 }
 
-// Phone photos are huge: shrink to a sensible JPEG before uploading.
-async function shrinkPhoto(file) {
-  const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
-  const scale = Math.min(1, 1400 / Math.max(bitmap.width, bitmap.height));
+// state.photo is null, { url } for the saved photo, or { canvas, crop } for a new/cropped one.
+function drawTo(source, crop, maxSide) {
+  const c = crop || { x: 0, y: 0, w: source.width, h: source.height };
+  const scale = Math.min(1, maxSide / Math.max(c.w, c.h));
   const canvas = document.createElement('canvas');
-  canvas.width = Math.round(bitmap.width * scale);
-  canvas.height = Math.round(bitmap.height * scale);
+  canvas.width = Math.max(1, Math.round(c.w * scale));
+  canvas.height = Math.max(1, Math.round(c.h * scale));
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  return new Promise((resolve, reject) => canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('Could not read that photo'))), 'image/jpeg', 0.85));
+  ctx.drawImage(source, c.x, c.y, c.w, c.h, 0, 0, canvas.width, canvas.height);
+  return canvas;
 }
 
-async function uploadPhoto(file) {
-  const blob = await shrinkPhoto(file);
+// Phone photos are huge: work on a sensibly sized copy.
+async function loadPhoto(blob) {
+  if (!blob || !blob.type.startsWith('image/')) return toast('That file isn\'t a photo');
+  try {
+    const bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+    state.photo = { canvas: drawTo(bitmap, null, 2000), crop: null };
+    renderPhoto();
+  } catch {
+    toast('Could not read that photo');
+  }
+}
+
+function renderPhoto() {
+  const box = $('#photo-current');
+  box.hidden = !state.photo;
+  box.innerHTML = '';
+  if (!state.photo) return;
+  const thumb = state.photo.url
+    ? Object.assign(new Image(), { src: state.photo.url, alt: '' })
+    : drawTo(state.photo.canvas, state.photo.crop, 400);
+  box.append(thumb);
+  box.insertAdjacentHTML('beforeend', `
+    <button type="button" class="btn small" data-action="photo-crop">Crop</button>
+    <button type="button" class="btn small ghost" data-action="photo-remove">Remove</button>`);
+}
+
+async function startCrop() {
+  if (state.photo.url) {
+    // Pull the saved photo back down so it can be re-cropped.
+    try {
+      const res = await fetch(state.photo.url);
+      if (!res.ok) throw new Error();
+      await loadPhoto(await res.blob());
+    } catch {
+      return toast('Could not load that photo to crop');
+    }
+  }
+  if (state.photo && state.photo.canvas) openCropper();
+}
+
+// Fixed 4:3 frame (the shape of the cards): drag to move, slider or scroll to zoom.
+function openCropper() {
+  const src = state.photo.canvas;
+  openSheet(`<div class="stack">
+    <h2>Crop photo</h2>
+    <p>Drag to move, slide to zoom. The frame is what shows on the list.</p>
+    <div class="crop-frame"></div>
+    <label>Zoom<input type="range" min="1" max="5" step="0.01" value="1"></label>
+    <div class="row">
+      <button type="button" class="btn ghost" data-close>Cancel</button>
+      <button type="button" class="btn ghost" data-crop="none">No crop</button>
+      <button type="button" class="btn primary" data-crop="apply">Crop</button>
+    </div>
+  </div>`);
+  const frame = sheet.querySelector('.crop-frame');
+  const slider = sheet.querySelector('input[type=range]');
+  const view = drawTo(src, null, Infinity);
+  frame.append(view);
+
+  const fw = frame.clientWidth, fh = frame.clientHeight;
+  const base = Math.max(fw / src.width, fh / src.height);
+  let scale = base, x = (fw - src.width * base) / 2, y = (fh - src.height * base) / 2;
+  if (state.photo.crop) {
+    scale = Math.min(base * 5, Math.max(base, fw / state.photo.crop.w));
+    x = -state.photo.crop.x * scale;
+    y = -state.photo.crop.y * scale;
+    slider.value = scale / base;
+  }
+  const paint = () => {
+    x = Math.min(0, Math.max(fw - src.width * scale, x));
+    y = Math.min(0, Math.max(fh - src.height * scale, y));
+    view.style.width = `${src.width * scale}px`;
+    view.style.transform = `translate(${x}px, ${y}px)`;
+  };
+  const zoomTo = (next) => {
+    const cx = (fw / 2 - x) / scale, cy = (fh / 2 - y) / scale;
+    scale = next;
+    x = fw / 2 - cx * scale;
+    y = fh / 2 - cy * scale;
+    paint();
+  };
+  paint();
+
+  slider.addEventListener('input', () => zoomTo(base * Number(slider.value)));
+  frame.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    slider.value = Math.min(5, Math.max(1, Number(slider.value) * (e.deltaY < 0 ? 1.08 : 1 / 1.08)));
+    zoomTo(base * Number(slider.value));
+  }, { passive: false });
+  let last = null;
+  frame.addEventListener('pointerdown', (e) => { frame.setPointerCapture(e.pointerId); last = [e.clientX, e.clientY]; });
+  frame.addEventListener('pointermove', (e) => {
+    if (!last) return;
+    x += e.clientX - last[0];
+    y += e.clientY - last[1];
+    last = [e.clientX, e.clientY];
+    paint();
+  });
+  const stop = () => { last = null; };
+  frame.addEventListener('pointerup', stop);
+  frame.addEventListener('pointercancel', stop);
+
+  sheet.querySelector('[data-crop=apply]').addEventListener('click', () => {
+    state.photo.crop = { x: -x / scale, y: -y / scale, w: fw / scale, h: fh / scale };
+    renderPhoto();
+    closeSheet();
+  });
+  sheet.querySelector('[data-crop=none]').addEventListener('click', () => {
+    state.photo.crop = null;
+    renderPhoto();
+    closeSheet();
+  });
+}
+
+async function uploadPhoto(photo) {
+  const out = drawTo(photo.canvas, photo.crop, 1400);
+  const blob = await new Promise((resolve, reject) => out.toBlob((b) => (b ? resolve(b) : reject(new Error('Could not read that photo'))), 'image/jpeg', 0.85));
   const path = `${crypto.randomUUID()}.jpg`;
   const { error } = await db.storage.from(PHOTO_BUCKET).upload(path, blob, { contentType: 'image/jpeg', cacheControl: '31536000' });
   if (error) throw new Error('Photo upload failed: ' + error.message);
@@ -408,9 +527,8 @@ itemForm.addEventListener('submit', async (e) => {
   btn.disabled = true;
   try {
     const f = itemForm.elements;
-    const existing = state.items.find((x) => x.id === state.editingId);
-    let photoUrl = existing && !(f.removePhoto && f.removePhoto.checked) ? existing.photo_url : null;
-    if (f.photo.files[0]) photoUrl = await uploadPhoto(f.photo.files[0]);
+    let photoUrl = null;
+    if (state.photo) photoUrl = state.photo.url || await uploadPhoto(state.photo);
     await rpc('admin_save_item', {
       p_password: state.adminPw,
       p_id: state.editingId,
@@ -436,6 +554,8 @@ $('#admin').addEventListener('click', (e) => {
   switch (el.dataset.action) {
     case 'admin-exit': showAdmin(false); break;
     case 'admin-cancel-edit': resetItemForm(); break;
+    case 'photo-crop': startCrop(); break;
+    case 'photo-remove': state.photo = null; renderPhoto(); break;
     case 'admin-edit':
       if (item) { resetItemForm(item); itemForm.scrollIntoView({ behavior: 'smooth' }); }
       break;
@@ -449,6 +569,27 @@ $('#admin').addEventListener('click', (e) => {
       });
       break;
   }
+});
+
+itemForm.elements.photo.addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (file) loadPhoto(file);
+});
+
+// Dropping a photo anywhere on the admin page adds it (and never navigates away).
+let dragTimer;
+window.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  if (!state.adminPw) return;
+  $('#dropzone').classList.add('over');
+  clearTimeout(dragTimer);
+  dragTimer = setTimeout(() => $('#dropzone').classList.remove('over'), 150);
+});
+window.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const file = e.dataTransfer && e.dataTransfer.files[0];
+  if (state.adminPw && !sheet.open && file) loadPhoto(file);
 });
 
 $('#sponsor').addEventListener('click', () => {
