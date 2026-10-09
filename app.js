@@ -120,7 +120,8 @@ function cardHtml(item, contribs, names) {
   if (!bought && item.status === 'reserved') {
     const d = daysLeft(item);
     actions += `<span class="pill">Reserved by ${esc(item.reserved_by)} – ${d} day${d === 1 ? '' : 's'} left</span>
-      <label class="tick"><input type="checkbox" data-action="bought" data-id="${item.id}"> Bought</label>`;
+      <label class="tick"><input type="checkbox" data-action="bought" data-id="${item.id}"> Bought</label>
+      <button type="button" class="link-btn" data-action="unreserve" data-id="${item.id}">Remove – I'm not buying it anymore</button>`;
   } else if (!bought) {
     if (price && contribs.length) actions += chipInHtml(price, contribs, names);
     if (!contribs.length) actions += `<label class="tick"><input type="checkbox" data-action="reserve" data-id="${item.id}"> I'm going to buy it</label>`;
@@ -146,9 +147,10 @@ function chipInHtml(price, contribs, names) {
   const pct = (n) => Math.min(100, (n / price) * 100).toFixed(2);
   const rows = contribs.map((c) => {
     const who = `<span><b>${esc(names.get(c.person_id) || 'Someone')}</b> · ${money(c.amount)}</span>`;
-    if (c.organised_with_rob) return `<li>${who}<span class="tag ok">Confirmed ✓</span></li>`;
+    const remove = `<button type="button" class="link-btn" data-action="unchip" data-id="${c.id}">Remove</button>`;
+    if (c.organised_with_rob) return `<li>${who}<span class="tag ok">Confirmed ✓</span>${remove}</li>`;
     return `<li>${who}<span class="tag wait">Pending</span>
-      <label class="tick small"><input type="checkbox" data-action="confirm" data-id="${c.id}"> I've organised this with Rob</label></li>`;
+      <label class="tick small"><input type="checkbox" data-action="confirm" data-id="${c.id}"> I've organised this with Rob</label>${remove}</li>`;
   }).join('');
   return `<div class="chip-in">
     <div class="bar" role="img" aria-label="${money(pledged)} of ${money(price)} pledged">
@@ -286,6 +288,30 @@ function helpSheet(item) {
   });
 }
 
+function unreserveSheet(item) {
+  openSheet(sheetForm(`Not buying “${esc(item.name)}” anymore?`,
+    `<p>No problem. Pick your name and it goes back on the list for someone else. Only the person who reserved it can remove it.</p>${namePicker()}`,
+    'Remove my reservation', 'danger'));
+  onSheetSubmit(async (form) => {
+    await rpc('cancel_reservation', { p_item_id: item.id, p_name: readName(form) });
+    closeSheet();
+    toast('Removed – it\'s back on the list');
+  });
+}
+
+function unchipSheet(contribution) {
+  openSheet(sheetForm(`Remove this ${money(contribution.amount)}?`,
+    `<p>Pick your name to take your contribution off. Only the person who chipped in can remove it.</p>
+     ${contribution.organised_with_rob ? '<div class="notice">You\'ve already organised this with Rob – let him know you\'ve changed your mind.</div>' : ''}
+     ${namePicker()}`,
+    'Remove my contribution', 'danger'));
+  onSheetSubmit(async (form) => {
+    await rpc('remove_contribution', { p_contribution_id: contribution.id, p_name: readName(form) });
+    closeSheet();
+    toast('Contribution removed');
+  });
+}
+
 function confirmSheet(contribution) {
   const person = state.people.find((p) => p.id === contribution.person_id);
   openSheet(sheetForm('All sorted with Rob?',
@@ -304,15 +330,16 @@ grid.addEventListener('click', (e) => {
   // Tickboxes only become ticked once the action has really gone through.
   if (el.type === 'checkbox') el.checked = false;
   const id = el.dataset.id;
-  if (el.dataset.action === 'confirm') {
+  if (el.dataset.action === 'confirm' || el.dataset.action === 'unchip') {
     const c = state.contributions.find((x) => x.id === id);
-    if (c) confirmSheet(c);
+    if (c) (el.dataset.action === 'confirm' ? confirmSheet : unchipSheet)(c);
     return;
   }
   const item = state.items.find((x) => x.id === id);
   if (!item) return;
   if (el.dataset.action === 'reserve') reserveSheet(item);
   if (el.dataset.action === 'bought') boughtSheet(item);
+  if (el.dataset.action === 'unreserve') unreserveSheet(item);
   if (el.dataset.action === 'help') helpSheet(item);
 });
 

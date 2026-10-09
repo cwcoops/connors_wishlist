@@ -105,6 +105,11 @@ a { color: var(--primary); }
 .row { display: flex; gap: 10px; flex-wrap: wrap; }
 .row .btn { flex: 1; }
 
+.link-btn {
+  appearance: none; background: none; border: 0; padding: 6px 2px; min-height: 36px; align-self: flex-start;
+  font: inherit; font-size: .88rem; font-weight: 600; color: var(--muted); text-decoration: underline; cursor: pointer;
+}
+
 /* contributions */
 .chip-in { display: flex; flex-direction: column; gap: 6px; }
 .bar { height: 12px; border-radius: 999px; background: #efe9df; overflow: hidden; display: flex; }
