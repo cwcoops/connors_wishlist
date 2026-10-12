@@ -88,6 +88,8 @@ a { color: var(--primary); }
 .pill.multi { background: #efe8ff; color: #2c1a73; }
 .getting { font-size: .9rem; overflow-wrap: anywhere; }
 
+.overdue { font-size: .85rem; font-weight: 600; color: #8a4b00; }
+
 .tick {
   display: flex; flex-direction: row; align-items: center; gap: 10px; min-height: 48px; padding: 8px 14px;
   border: 2px solid var(--line); border-radius: 14px; font-weight: 700; cursor: pointer;

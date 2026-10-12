@@ -1,8 +1,7 @@
 const SUPABASE_URL = 'https://bjectonbtzkyhwknpkyf.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_xnLOTsP5nGdplpzlk687Og_OG4wXjcH';
 const PHOTO_BUCKET = 'item-photos';
-const RESERVE_MS = 5 * 24 * 60 * 60 * 1000;
-const DAY_MS = 24 * 60 * 60 * 1000;
+const OVERDUE_MS = 7 * 24 * 60 * 60 * 1000;
 const ROB_NOTICE = "No payments go through this site. Contact Rob (Connor's dad) to send your contribution — he'll tell you whether to send money or get a gift card etc.";
 
 const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -41,11 +40,8 @@ function whereHtml(where) {
   return esc(text);
 }
 
-function daysLeft(item) {
-  const left = new Date(item.reserved_at).getTime() + RESERVE_MS - Date.now();
-  return Math.max(1, Math.ceil(left / DAY_MS));
-}
-const isExpired = (item) => item.status === 'reserved' && new Date(item.reserved_at).getTime() + RESERVE_MS <= Date.now();
+// Reservations never expire, but after a week without "Bought" we nudge people to check.
+const isOverdue = (item) => new Date(item.reserved_at).getTime() + OVERDUE_MS <= Date.now();
 
 // ---------- data ----------
 async function load() {
@@ -67,21 +63,12 @@ async function load() {
   state.buyers = buyers.data;
   state.loaded = true;
   render();
-  checkExpiry();
 }
 
 let reloadTimer;
 function scheduleLoad() {
   clearTimeout(reloadTimer);
   reloadTimer = setTimeout(load, 150);
-}
-
-// Reservations lapse after 5 days: the server resets them, any open page triggers it.
-async function checkExpiry() {
-  if (!state.items.some(isExpired)) return;
-  const { error } = await db.rpc('expire_reservations');
-  if (error) console.error(error);
-  else scheduleLoad();
 }
 
 async function rpc(name, args) {
@@ -127,8 +114,7 @@ function cardHtml(item, contribs, names, gettingOne) {
     actions += `<label class="tick"><input type="checkbox" data-action="multi" data-id="${item.id}"> I'm getting one</label>`;
     if (gettingOne.length) actions += `<button type="button" class="link-btn" data-action="unmulti" data-id="${item.id}">Remove – I'm not getting one anymore</button>`;
   } else if (!bought && item.status === 'reserved') {
-    const d = daysLeft(item);
-    actions += `<span class="pill">Reserved by ${esc(item.reserved_by)} – ${d} day${d === 1 ? '' : 's'} left</span>
+    actions += `<span class="pill">Reserved by ${esc(item.reserved_by)}</span>${isOverdue(item) ? "<p class=\"overdue\">Buyer hasn't confirmed they've bought it yet – check with Rob.</p>" : ''}
       <label class="tick"><input type="checkbox" data-action="bought" data-id="${item.id}"> Bought</label>
       <button type="button" class="link-btn" data-action="unreserve" data-id="${item.id}">Remove – I'm not buying it anymore</button>`;
   } else if (!bought) {
@@ -259,7 +245,7 @@ function reserveSheet(item) {
     await rpc('reserve_item', { p_item_id: item.id, p_name: name });
     localStorage.setItem('wishlist-name', name);
     infoSheet(`It's yours, ${esc(name)}! 🎉`,
-      `<div class="notice">You've got 5 days to buy this, otherwise it goes back on the list. Come back and tick 'Bought' once you've got it!</div>`);
+      `<div class="notice">Take as long as you need – it's off the list for everyone else. Come back and tick 'Bought' once you've got it!</div>`);
   });
 }
 
@@ -668,7 +654,7 @@ db.channel('wishlist')
 
 // Phones drop the socket when the tab sleeps, so catch up on return.
 document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
-setInterval(() => { if (!state.adminPw) renderGuest(); checkExpiry(); }, 30000);
+setInterval(() => { if (!state.adminPw) renderGuest(); }, 60000);
 
 // Opening the page at #admin goes straight to the password box with the list hidden.
 if (location.hash === '#admin') {
